@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write # Nécessaire pour pousser sur GHCR
+      packages: write
 
     steps:
     - name: Checkout repository
@@ -20,12 +20,11 @@ jobs:
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }} # Ce token est généré automatiquement
+        password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v4
       with:
         context: .
         push: true
-        # Remplace les placeholders par ton nom d'utilisateur et nom de projet
-        tags: ghcr.io/${{ github.repository_owner }}/nom-du-projet:latest
+        tags: ghcr.io/${{ github.repository_owner }}/cross-seed-mover:latest
