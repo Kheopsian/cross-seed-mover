@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  cross-seed-mover:
+    image: ghcr.io/kheopsian/cross-seed-mover:latest
+    container_name: cross-seed-mover
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    environment:
+      - QB_HOST=${QB_HOST}
+      - QB_PORT=${QB_PORT}
+      - QB_USER=${QB_USER}
+      - QB_PASS=${QB_PASS}
+      - QB_CATEGORY_WATCH=${QB_CATEGORY_WATCH}
+      - QB_CATEGORY_PROMOTE=${QB_CATEGORY_PROMOTE}
