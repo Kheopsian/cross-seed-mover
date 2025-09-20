@@ -62,7 +62,8 @@ def process_cross_seed_event(original_hash, new_hashes, trackers, torrent_name):
             final_content_path = os.path.join(HDD_WATCHED_PATH, original_props['name'])
             logging.info(f"Physically moving original content to '{final_content_path}'")
             os.makedirs(os.path.dirname(final_content_path), exist_ok=True) # Ensure parent directory exists
-            os.rename(original_content_path, final_content_path)
+            # Use shutil.move() instead of os.rename() to handle cross-device moves
+            shutil.move(original_content_path, final_content_path)
 
             # 4. Update qBittorrent for the original torrent
             s.post(urljoin(api_url, "api/v2/torrents/setLocation"), data={'hashes': original_hash, 'location': HDD_WATCHED_PATH}).raise_for_status()
