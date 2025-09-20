@@ -3,7 +3,7 @@ import logging
 import requests
 import shutil
 from flask import Flask, request
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -23,17 +23,8 @@ HDD_CROSS_SEED_PATH = os.environ.get('HDD_CROSS_SEED_PATH') # e.g., /data/downlo
 if not all([QB_USER, QB_PASS, HDD_WATCHED_PATH, HDD_CROSS_SEED_PATH]):
     raise ValueError("Missing required environment variables: QB_USER, QB_PASS, HDD_WATCHED_PATH, and HDD_CROSS_SEED_PATH")
 
-def get_tracker_name(tracker_url):
-    """Extracts a clean folder name from the tracker's URL."""
-    try:
-        # Extracts the domain name (e.g., tracker.example.com)
-        return urlparse(tracker_url).netloc
-    except Exception:
-        # Fallback for any parsing error
-        return "unknown-tracker"
-
 # --- qBittorrent Logic ---
-def process_cross_seed_event(original_hash, new_hashes, trackers, torrent_name):
+def process_cross_seed_event(original_hash, new_hashes):
     """
     Physically moves the original torrent's content, creates hardlinks for new torrents,
     and updates qBittorrent with the new locations.
@@ -51,45 +42,48 @@ def process_cross_seed_event(original_hash, new_hashes, trackers, torrent_name):
                 return False
             logging.info("Successfully logged in to qBittorrent.")
 
-            # 2. Get properties of the original torrent
+            # 2. Get properties of the original torrent to get its real name and path
             props_res = s.get(urljoin(api_url, f"/api/v2/torrents/properties?hash={original_hash}"))
             props_res.raise_for_status()
             original_props = props_res.json()
+            torrent_name = original_props.get('name', 'Unknown Name') # More reliable way to get the name
             original_content_path = os.path.join(original_props['save_path'], original_props['name'])
-            is_directory = os.path.isdir(original_content_path)
+            
+            logging.info(f"Processing torrent: '{torrent_name}'")
 
             # 3. Physically move the original content
             final_content_path = os.path.join(HDD_WATCHED_PATH, original_props['name'])
-            logging.info(f"Physically moving original content to '{final_content_path}'")
-            os.makedirs(os.path.dirname(final_content_path), exist_ok=True) # Ensure parent directory exists
-            # Use shutil.move() instead of os.rename() to handle cross-device moves
+            logging.info(f"Physically moving original content from '{original_content_path}' to '{final_content_path}'")
+            os.makedirs(os.path.dirname(final_content_path), exist_ok=True)
             shutil.move(original_content_path, final_content_path)
+            
+            # Check if the moved content is a directory or a single file
+            is_content_directory = os.path.isdir(final_content_path)
+            logging.info(f"Content is a {'directory' if is_content_directory else 'file'}.")
 
             # 4. Update qBittorrent for the original torrent
             s.post(urljoin(api_url, "api/v2/torrents/setLocation"), data={'hashes': original_hash, 'location': HDD_WATCHED_PATH}).raise_for_status()
             logging.info(f"Updated location for original torrent '{torrent_name}' in qBittorrent.")
 
             # 5. Process all new cross-seed torrents
-            for new_hash, new_tracker_url in zip(new_hashes, trackers):
+            for new_hash in new_hashes:
                 new_props_res = s.get(urljoin(api_url, f"/api/v2/torrents/properties?hash={new_hash}"))
                 new_props_res.raise_for_status()
                 new_props = new_props_res.json()
                 
-                # Path to the content created by cross-seed (to be removed)
+                # Path to the temporary content created by cross-seed (to be removed)
                 source_content_to_remove = os.path.join(new_props['save_path'], new_props['name'])
                 
-                # Create destination folder for hardlinks
-                tracker_name = get_tracker_name(new_tracker_url)
-                new_torrent_folder = os.path.join(HDD_CROSS_SEED_PATH, tracker_name)
+                # FIX: Derive tracker name from the source save_path for 1:1 structure
+                tracker_folder_name = os.path.basename(new_props['save_path'])
+                new_torrent_folder = os.path.join(HDD_CROSS_SEED_PATH, tracker_folder_name)
                 os.makedirs(new_torrent_folder, exist_ok=True)
                 
-                # The destination path for the hardlink will be inside the tracker-specific folder
                 hardlink_destination_path = os.path.join(new_torrent_folder, new_props['name'])
 
-                logging.info(f"Processing {'directory' if is_directory else 'file'}: '{new_props['name']}'")
-
-                if is_directory:
-                    # Create the directory structure and hardlink each file
+                # FIX: Linking logic based on whether the final content is a file or directory
+                if is_content_directory:
+                    logging.info(f"Creating hardlink directory for '{new_props['name']}' at '{hardlink_destination_path}'")
                     os.makedirs(hardlink_destination_path, exist_ok=True)
                     for dirpath, _, filenames in os.walk(final_content_path):
                         relative_dir = os.path.relpath(dirpath, final_content_path)
@@ -99,31 +93,32 @@ def process_cross_seed_event(original_hash, new_hashes, trackers, torrent_name):
                         for filename in filenames:
                             source_file = os.path.join(dirpath, filename)
                             destination_file = os.path.join(destination_dir, filename)
-                            logging.info(f"Creating hardlink for '{filename}' at '{destination_file}'")
-                            os.link(source_file, destination_file)
-                    
-                    # Remove the original cross-seed directory
-                    logging.info(f"Removing original cross-seed directory '{source_content_to_remove}'")
-                    if os.path.exists(source_content_to_remove):
-                        shutil.rmtree(source_content_to_remove)
+                            if not os.path.exists(destination_file):
+                                os.link(source_file, destination_file)
                 else:
-                    # It's a single file, create a hardlink
-                    logging.info(f"Creating hardlink for '{new_props['name']}' at '{hardlink_destination_path}'")
-                    os.link(final_content_path, hardlink_destination_path)
+                    logging.info(f"Creating hardlink file for '{new_props['name']}' at '{hardlink_destination_path}'")
+                    if not os.path.exists(hardlink_destination_path):
+                        os.link(final_content_path, hardlink_destination_path)
 
-                    # Remove the original cross-seed file
+                # FIX: Robustly remove the source content, checking if it's a file or directory
+                if os.path.isdir(source_content_to_remove):
+                    logging.info(f"Removing original cross-seed directory '{source_content_to_remove}'")
+                    shutil.rmtree(source_content_to_remove)
+                elif os.path.isfile(source_content_to_remove):
                     logging.info(f"Removing original cross-seed file '{source_content_to_remove}'")
-                    if os.path.exists(source_content_to_remove):
-                        os.remove(source_content_to_remove)
+                    os.remove(source_content_to_remove)
+                else:
+                    logging.warning(f"Could not find source content to remove at '{source_content_to_remove}'")
 
-                # Update qBittorrent with the new location
+
+                # Update qBittorrent with the new location for the cross-seeded torrent
                 s.post(urljoin(api_url, "api/v2/torrents/setLocation"), data={'hashes': new_hash, 'location': new_torrent_folder}).raise_for_status()
                 logging.info(f"Updated location for new torrent '{new_props['name']}' in qBittorrent.")
 
             # 6. Change the category of the original torrent
             category_payload = {'hashes': original_hash, 'category': QB_CATEGORY_PROMOTE}
             s.post(urljoin(api_url, "api/v2/torrents/setCategory"), data=category_payload).raise_for_status()
-            logging.info(f"Category for original torrent changed to '{QB_CATEGORY_PROMOTE}'.")
+            logging.info(f"Category for original torrent '{torrent_name}' changed to '{QB_CATEGORY_PROMOTE}'.")
             
             return True
 
@@ -149,13 +144,12 @@ def handle_webhook():
         
         original_hash = searchee.get('infoHash')
         current_category = searchee.get('category')
-        torrent_name = searchee.get('name', 'Unknown Name')
+        torrent_name = searchee.get('name', 'Unknown Name') # Used only for initial log
         
         new_hashes = data['extra'].get('infoHashes')
-        trackers = data['extra'].get('trackers')
         
-        if not (new_hashes and trackers):
-            return "Ignored: Missing 'infoHashes' or 'trackers'.", 200
+        if not new_hashes:
+            return "Ignored: Missing 'infoHashes'.", 200
             
     except (KeyError, TypeError, IndexError):
         logging.warning("Webhook received with invalid or incomplete JSON structure.")
@@ -163,7 +157,7 @@ def handle_webhook():
 
     if result == "INJECTED" and current_category == QB_CATEGORY_WATCH:
         logging.info(f"Torrent '{torrent_name}' was cross-seeded with {len(new_hashes)} matches and is in the watched category '{current_category}'. Initiating move.")
-        success = process_cross_seed_event(original_hash, new_hashes, trackers, torrent_name)
+        success = process_cross_seed_event(original_hash, new_hashes)
         
         if success:
             return "Move and promote action for all torrents successful.", 200
@@ -175,3 +169,4 @@ def handle_webhook():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=9092)
+
