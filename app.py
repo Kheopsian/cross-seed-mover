@@ -79,6 +79,7 @@ def handle_webhook():
         searchee = data['extra']['searchee']
         info_hash = searchee.get('infoHash')
         current_category = searchee.get('category')
+        torrent_name = searchee.get('name', 'Unknown') # Récupère le nom, avec une valeur par défaut
     except (KeyError, TypeError):
         logging.warning("Webhook received with invalid or incomplete JSON structure.")
         return "Error: Invalid JSON structure", 400
@@ -90,7 +91,7 @@ def handle_webhook():
     # --- Filtering Logic ---
     # Check if the torrent's category matches the one to watch
     if current_category == QB_CATEGORY_WATCH:
-        logging.info(f"Torrent {info_hash} is in the watched category ('{current_category}'). Attempting to promote.")
+        logging.info(f"Torrent '{torrent_name}' ({info_hash}) is in the watched category ('{current_category}'). Attempting to promote.")
         success = promote_torrent(info_hash)
         
         if success:
@@ -98,7 +99,7 @@ def handle_webhook():
         else:
             return "Promotion action failed.", 500
     else:
-        logging.info(f"Torrent {info_hash} in category '{current_category}' is not watched. Action ignored.")
+        logging.info(f"Torrent '{torrent_name}' ({info_hash}) in category '{current_category}' is not watched. Action ignored.")
         return "Torrent not in a watched category, action ignored.", 200
 
 
