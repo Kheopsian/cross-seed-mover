@@ -1,27 +1,26 @@
 # cross-seed-mover
 
-`cross-seed-mover` is a simple webhook service designed to integrate with [cross-seed](https://www.cross-seed.org/). It listens for notifications and automatically changes the category of torrents in qBittorrent, allowing for better post-processing automation.
+`cross-seed-mover` is a webhook service that seamlessly integrates with [cross-seed](https://www.cross-seed.org/) to automate advanced file management in qBittorrent. It intelligently moves torrents after a successful cross-seed, organizing both the original and newly seeded files into separate, structured locations.
 
 ## Purpose
 
-This service automates file management to solve a common problem for `cross-seed` users who download to an SSD but store their media library on a separate HDD array.
+This service is designed for users who want precise control over where their files are stored after being processed by `cross-seed`. It's especially useful for separating original downloads from files generated for cross-seeding, and for organizing cross-seeded content by tracker.
 
 ### The Problem
 
-1.  You download a new torrent, and it saves to a "fast" drive (e.g., an SSD) for quick access.
-2.  `cross-seed` runs, finds a match on another tracker, and attempts to inject a new torrent for cross-seeding.
-3.  To avoid data duplication, `cross-seed` tries to create a **hardlink**. However, if your media library (the destination for the new torrent) is on a different filesystem (e.g., an HDD array), the hardlink creation **fails**.
-4.  `cross-seed` sends a notification via webhook after finding the match.
+When `cross-seed` injects a new torrent, both the original and the new torrent often remain in the same download directory. This can lead to several challenges:
+-   **Disorganized Files:** It's hard to distinguish between original files and those created specifically for cross-seeding.
+-   **Manual Sorting:** You have to manually move files to their final destinations (e.g., a media library for the original, a dedicated seed folder for the new one).
+-   **Filesystem Constraints:** If you download to a temporary location (like an SSD) and your final library is on a different filesystem (like an HDD array), `cross-seed` might fail to create hardlinks.
 
 ### The Solution
 
-`cross-seed-mover` acts as the bridge to resolve this failure:
+`cross-seed-mover` provides a fully automated, two-part solution triggered by a `cross-seed` webhook:
 
-1.  The service listens for the webhook from `cross-seed`.
-2.  Upon receiving a notification for a torrent in the "watch" category (the one on your SSD), it connects to qBittorrent.
-3.  It changes the torrent's category to your "promote" category.
-4.  In qBittorrent, you must configure this "promote" category to save files to your HDD array. This category change triggers qBittorrent to **physically move the files** from the SSD to the array.
-5.  On the next run, `cross-seed` will be able to successfully inject the torrent because the source files are now on the same filesystem as your media library, allowing the hardlink to be created.
+1.  **Listens for Success:** The service waits for a successful injection notification from `cross-seed` for any torrent in a designated "watch" category.
+2.  **Moves the Original Torrent:** It relocates the original torrent's files to your primary media library or long-term storage path (`HDD_WATCHED_PATH`).
+3.  **Moves the New Torrent:** It moves the newly injected cross-seed torrent to a separate location (`HDD_CROSS_SEED_PATH`), automatically creating a subfolder named after the torrent's tracker (e.g., `/data/cross-seed/private.tracker.org/`).
+4.  **Promotes the Original:** Finally, it changes the category of the original torrent to a "promote" category, signaling that it has been processed and is ready for long-term seeding or archival.
 
 ## Usage
 
@@ -41,6 +40,13 @@ services:
     restart: unless-stopped
     ports:
       - "9092:9092"
+    volumes:
+      # Mount your qBittorrent download path, where cross-seed also operates
+      - /path/to/your/downloads:/path/to/your/downloads
+      # Mount your final media library path
+      - /path/to/your/library:/path/to/your/library
+      # Mount the base path for cross-seed torrents
+      - /path/to/your/cross-seed-storage:/path/to/your/cross-seed-storage
     environment:
       - QB_HOST=your_qbittorrent_host
       - QB_PORT=8080
@@ -48,22 +54,35 @@ services:
       - QB_PASS=your_qbittorrent_password
       - QB_CATEGORY_WATCH=race
       - QB_CATEGORY_PROMOTE=longterm
+      # IMPORTANT: These paths must match the container-side paths from your volumes
+      - HDD_WATCHED_PATH=/path/to/your/library
+      - HDD_CROSS_SEED_PATH=/path/to/your/cross-seed-storage
 ```
 
 ## Configuration
 
 The service is configured entirely through environment variables:
 
-| Variable            | Description                                                                 | Default     |
-| ------------------- | --------------------------------------------------------------------------- | ----------- |
-| `QB_HOST`           | The hostname or IP address of your qBittorrent instance.                    | `localhost` |
-| `QB_PORT`           | The port for the qBittorrent Web UI.                                        | `8080`      |
-| `QB_USER`           | Your qBittorrent username.                                                  | **None**    |
-| `QB_PASS`           | Your qBittorrent password.                                                  | **None**    |
-| `QB_CATEGORY_WATCH` | The "source" category that this service will monitor.                       | `race`      |
-| `QB_CATEGORY_PROMOTE` | The "destination" category where torrents will be moved.                    | `longterm`  |
+| Variable | Description | Default | Required |
+| :--- | :--- | :--- | :--- |
+| `QB_HOST` | The hostname or IP address of your qBittorrent instance. | `localhost` | No |
+| `QB_PORT` | The port for the qBittorrent Web UI. | `8080` | No |
+| `QB_USER` | Your qBittorrent username. | **None** | **Yes** |
+| `QB_PASS` | Your qBittorrent password. | **None** | **Yes** |
+| `QB_CATEGORY_WATCH` | The source category that this service will monitor. | `race` | No |
+| `QB_CATEGORY_PROMOTE` | The destination category assigned to the original torrent after moving. | `longterm` | No |
+| `HDD_WATCHED_PATH` | The absolute path **inside the container** to move the original torrent to. | **None** | **Yes** |
+| `HDD_CROSS_SEED_PATH` | The absolute path **inside the container** where new cross-seeded torrents will be stored. | **None** | **Yes** |
 
-**Note:** `QB_USER` and `QB_PASS` are required.
+### Important Note on Volumes
+
+For the script to create hardlinks, the Docker container needs direct access to the filesystems. You **must** mount the relevant host paths as volumes.
+
+-   The path where qBittorrent saves initial downloads.
+-   The path for your final media library (`HDD_WATCHED_PATH`).
+-   The path for your cross-seed storage (`HDD_CROSS_SEED_PATH`).
+
+All these locations must reside on the **same filesystem** for hardlinks to work. The `environment` variables for paths must match the paths you define on the right side of the volume mappings (the container's perspective).
 
 ## Webhook Configuration
 
@@ -78,4 +97,4 @@ module.exports = {
 };
 ```
 
-When a torrent is snatched, cross-seed will send a POST request to the webhook endpoint. `cross-seed-mover` will then check if the torrent's category matches `QB_CATEGORY_WATCH`. If it does, it will change the torrent's category to `QB_CATEGORY_PROMOTE` in qBittorrent.
+When `cross-seed` successfully injects a new torrent, it will send a POST request to this service. If the original torrent's category matches `QB_CATEGORY_WATCH`, the service will perform the move operations as described above.

@@ -7,6 +7,10 @@ services:
     restart: unless-stopped
     ports:
       - "9092:9092"
+    volumes:
+      - ${DATA_PATH_DOWNLOADS}:${DATA_PATH_DOWNLOADS} # Mount the base download folder
+      - ${HDD_WATCHED_PATH}:${HDD_WATCHED_PATH} # Mount the final library path
+      - ${HDD_CROSS_SEED_PATH}:${HDD_CROSS_SEED_PATH} # Mount the cross-seed base path
     environment:
       - QB_HOST=${QB_HOST}
       - QB_PORT=${QB_PORT}
@@ -14,3 +18,5 @@ services:
       - QB_PASS=${QB_PASS}
       - QB_CATEGORY_WATCH=${QB_CATEGORY_WATCH}
       - QB_CATEGORY_PROMOTE=${QB_CATEGORY_PROMOTE}
+      - HDD_WATCHED_PATH=${HDD_WATCHED_PATH}
+      - HDD_CROSS_SEED_PATH=${HDD_CROSS_SEED_PATH}
