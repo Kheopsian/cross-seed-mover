@@ -46,6 +46,114 @@ def process_cross_seed_event(original_hash, new_hashes):
             props_res = s.get(urljoin(api_url, f"/api/v2/torrents/properties?hash={original_hash}"))
             props_res.raise_for_status()
             original_props = props_res.json()
+            torrent_name = original_props.get('name', 'Unknown Name')
+            original_content_path = os.path.join(original_props['save_path'], original_props['name'])
+            
+            logging.info(f"Processing torrent: '{torrent_name}'")
+
+            # 3. Physically move the original content
+            final_content_path = os.path.join(HDD_WATCHED_PATH, original_props['name'])
+            logging.info(f"Physically moving original content from '{original_content_path}' to '{final_content_path}'")
+            os.makedirs(os.path.dirname(final_content_path), exist_ok=True)
+            shutil.move(original_content_path, final_content_path)
+            
+            # 4. Update qBittorrent for the original torrent
+            s.post(urljoin(api_url, "api/v2/torrents/setLocation"), data={'hashes': original_hash, 'location': HDD_WATCHED_PATH}).raise_for_status()
+            logging.info(f"Updated location for original torrent '{torrent_name}' in qBittorrent.")
+
+            # 5. Process all new cross-seed torrents
+            for new_hash in new_hashes:
+                new_props_res = s.get(urljoin(api_url, f"/api/v2/torrents/properties?hash={new_hash}"))
+                new_props_res.raise_for_status()
+                new_props = new_props_res.json()
+                
+                # Path to the temporary content created by cross-seed (to be removed)
+                source_content_to_remove = os.path.join(new_props['save_path'], new_props['name'])
+                
+                # Check the structure of the NEW torrent's content, not the original's.
+                is_new_content_directory = os.path.isdir(source_content_to_remove)
+                logging.info(f"New torrent '{new_props['name']}' content is a {'directory' if is_new_content_directory else 'file'}.")
+
+                tracker_folder_name = os.path.basename(new_props['save_path'])
+                new_torrent_folder = os.path.join(HDD_CROSS_SEED_PATH, tracker_folder_name)
+                os.makedirs(new_torrent_folder, exist_ok=True)
+                
+                hardlink_destination_path = os.path.join(new_torrent_folder, new_props['name'])
+
+                # The linking logic is now based on is_new_content_directory
+                if is_new_content_directory:
+                    logging.info(f"Creating hardlink directory for '{new_props['name']}' at '{hardlink_destination_path}'")
+                    # Ensure the destination directory exists before walking
+                    os.makedirs(hardlink_destination_path, exist_ok=True)
+                    # The source for linking is the MOVED original content
+                    source_for_linking = final_content_path
+                    
+                    # Walk through the source directory and create links in the destination
+                    for dirpath, _, filenames in os.walk(source_for_linking):
+                        relative_dir = os.path.relpath(dirpath, source_for_linking)
+                        destination_dir = os.path.join(hardlink_destination_path, relative_dir)
+                        os.makedirs(destination_dir, exist_ok=True)
+                        
+                        for filename in filenames:
+                            source_file = os.path.join(dirpath, filename)
+                            destination_file = os.path.join(destination_dir, filename)
+                            if not os.path.exists(destination_file):
+                                os.link(source_file, destination_file)
+                else: # It's a single file
+                    logging.info(f"Creating hardlink file for '{new_props['name']}' at '{hardlink_destination_path}'")
+                    # The source for linking is the MOVED original file
+                    source_for_linking = final_content_path
+                    if not os.path.exists(hardlink_destination_path):
+                        os.link(source_for_linking, hardlink_destination_path)
+
+                # Now, robustly remove the source content that cross-seed created
+                if os.path.isdir(source_content_to_remove):
+                    logging.info(f"Removing original cross-seed directory '{source_content_to_remove}'")
+                    shutil.rmtree(source_content_to_remove)
+                elif os.path.isfile(source_content_to_remove):
+                    logging.info(f"Removing original cross-seed file '{source_content_to_remove}'")
+                    os.remove(source_content_to_remove)
+                else:
+                    logging.warning(f"Could not find source content to remove at '{source_content_to_remove}'")
+
+                # Update qBittorrent with the new location for the cross-seeded torrent
+                s.post(urljoin(api_url, "api/v2/torrents/setLocation"), data={'hashes': new_hash, 'location': new_torrent_folder}).raise_for_status()
+                logging.info(f"Updated location for new torrent '{new_props['name']}' in qBittorrent.")
+
+            # 6. Change the category of the original torrent
+            category_payload = {'hashes': original_hash, 'category': QB_CATEGORY_PROMOTE}
+            s.post(urljoin(api_url, "api/v2/torrents/setCategory"), data=category_payload).raise_for_status()
+            logging.info(f"Category for original torrent '{torrent_name}' changed to '{QB_CATEGORY_PROMOTE}'.")
+            
+            return True
+
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Error communicating with the qBittorrent API: {e}")
+            return False
+        except (OSError, IOError) as e:
+            logging.error(f"File system error: {e}")
+            return False
+    """
+    Physically moves the original torrent's content, creates hardlinks for new torrents,
+    and updates qBittorrent with the new locations.
+    """
+    api_url = f"http://{QB_HOST}:{QB_PORT}/"
+    
+    with requests.Session() as s:
+        try:
+            # 1. Login to qBittorrent
+            login_payload = {'username': QB_USER, 'password': QB_PASS}
+            login_response = s.post(urljoin(api_url, "api/v2/auth/login"), data=login_payload)
+            login_response.raise_for_status()
+            if "Ok." not in login_response.text:
+                logging.error("Failed to log in to qBittorrent.")
+                return False
+            logging.info("Successfully logged in to qBittorrent.")
+
+            # 2. Get properties of the original torrent to get its real name and path
+            props_res = s.get(urljoin(api_url, f"/api/v2/torrents/properties?hash={original_hash}"))
+            props_res.raise_for_status()
+            original_props = props_res.json()
             torrent_name = original_props.get('name', 'Unknown Name') # More reliable way to get the name
             original_content_path = os.path.join(original_props['save_path'], original_props['name'])
             
